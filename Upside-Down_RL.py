@@ -40,7 +40,7 @@ replay_size = 500
 return_scale = 20
 
 # Evaluate the agent after `evaluate_every` iterations
-evaluate_every = 10
+evaluate_every = 1
 
 # Target return before breaking out of the training loop
 target_return = 1
@@ -283,29 +283,34 @@ def train_behavior(behavior, buffer, n_updates, batch_size):
         batch_actions = []
         batch_target = []
         batch_return_to_go = []
+        batch_command = []
         time = []
         for episode in episodes:
             T = episode.length
             t1 = np.random.randint(0, T)
             t2 = min(t1+behavior.seq_len,T-1)
             dt = t2 - t1
-            dr = sum(episode.rewards[t1:t2])
-
+            dr = np.array([sum(episode.rewards[t1:t])for t in range(t2,t1,-1)])
+            horizon = np.flip(np.arange(0,t2-t1)) +1.0
+            command = [[dr[index],horizon[index]] for index in range(horizon.shape[0])]
+            
+            
             st1 = episode.states[t1:t2]
             at1 = episode.actions[t1:t2+1] # take the next action with it 
             at1 = state_to_dummy(at1)
             target = at1[-1]
             at1 = at1[:-1]
+            st1 = padding(np.array(st1),behavior.seq_len,behavior.state_size)
+            at1 = padding(np.array(at1),behavior.seq_len,behavior.action_size)
             
-            st1 = padding(np.array(st1),behavior.seq_len,behavior.model.state_size)
-            at1 = padding(np.array(at1),behavior.seq_len,behavior.model.action_size)
-
-            dr = padding(np.array(dr),behavior.seq_len,behavior.model.r_size)
+            command = padding(np.array(command),behavior.seq_len,2)
+            
             batch_states.append(st1)
             batch_actions.append(at1)
             batch_target.append(target)
             time.append(dt)
-            batch_return_to_go.append(dr)
+
+            batch_command.append(command)
         
 
         batch_states = torch.Tensor(np.array(batch_states)).to(device)
@@ -313,8 +318,8 @@ def train_behavior(behavior, buffer, n_updates, batch_size):
         time = torch.Tensor(np.array(time)).to(device)
         batch_actions = torch.Tensor(np.array(batch_actions)).to(device)
         batch_target = torch.Tensor(np.array(batch_target)).to(device)
-        
-        pred = behavior(batch_return_to_go,batch_states,batch_actions,time)
+        batch_command = torch.Tensor(np.array(batch_command)).to(device)
+        pred = behavior(batch_command,batch_states,batch_actions,time)
         
         loss = F.cross_entropy(pred, batch_target)
         
@@ -380,14 +385,16 @@ def evaluate_agent(env, behavior, command, render=False):
         done = False
         total_reward = 0
         state = list(env.reset()[0])
-    
+        action =np.array([])
+        # returns_to_go = np.array([1])
+        # returns_to_go=states_to_returns_to_go(state)
         while not done:
             if render: env.render()
             
-            state_input = torch.FloatTensor(state).to(device)
-            command_input = torch.FloatTensor(command).to(device)
-
-            action = behavior.greedy_action(state_input, command_input)
+            t =10  
+            command_input,state_input,action_input = behavior.padding_input([command],[state],[action])
+            action = behavior.forward(torch.Tensor(command_input),torch.Tensor(state_input), torch.Tensor(action_input),t)
+            action = np.argmax(action.detach().numpy())
             next_state, reward, done, _,_ = env.step(action)
 
             total_reward += reward
@@ -400,7 +407,7 @@ def evaluate_agent(env, behavior, command, render=False):
         
         if render: env.close()
         
-        all_rewards.append(total_reward)
+        
     
     mean_return = np.mean(all_rewards)
     print('Reward achieved: {:.2f}'.format(mean_return))
@@ -416,6 +423,21 @@ make_episode = namedtuple('Episode',
                                        'total_return', 
                                        'length', 
                                        ])    
+# def transform(Episode,seq_len):
+#     """should get a Episode named tuple, 
+#      return the Episode in the return format """
+#     states= Episode['states']
+#     actions = Episode['actions']
+#     rewards = Episode['rewards']
+#     n = rewards.shape[0]
+#     returns_to_go = [sum(rewards[index:])for index in range(n)]
+#     input_format = []
+
+#     assert states.shape[0] == actions.states[0] == returns_to_go.shape[0]
+#     for index in range(n):
+#         input_format.append
+        
+
 def generate_episode(env, policy, init_command=[1, 1]):
     '''
     Generate an episode using the Behaviour function.
@@ -440,6 +462,7 @@ def generate_episode(env, policy, init_command=[1, 1]):
     time_steps = 0
     done = False
     total_rewards = 0
+    commands = []
     state = list(env.reset()[0])
     
     while not done:
@@ -478,9 +501,10 @@ def generate_episode(env, policy, init_command=[1, 1]):
         desired_horizon = max(desired_horizon - 1, 1)
     
         command = [desired_return, desired_horizon]
+        commands.append(command)
         time_steps += 1
         
-    return make_episode(states, actions, rewards, init_command, sum(rewards), time_steps)
+    return make_episode(states, actions, rewards, commands, sum(rewards), time_steps)
 def UDRL(env, buffer=None, behavior=None, learning_history=[]):
     '''
     Upside-Down Reinforcement Learning main algrithm
@@ -583,7 +607,7 @@ def initialize_behavior_function(state_size,
     '''
     print("state size",state_size) 
     print("action size",action_size)
-    behavior = BasicModel(state_dim=state_size,action_dim=action_size)
+    behavior = BasicModel(state_dim=state_size,action_dim=action_size,r_dim=2)
     
     behavior.init_optimizer(lr=torch.tensor(learning_rate))
     
@@ -619,10 +643,10 @@ def padding(state,seq_len,embedding_size):
     try:
         if state.size == 0:
             return np.zeros([seq_len,embedding_size])
-        elif state.shape.equals([seq_len,embedding_size]):
+        elif state.shape==tuple([seq_len,embedding_size]):
             return state
         elif state.shape[0] < seq_len:
-            state = np.zeros([seq_len-state.shape[0], embedding_size]) + state
+            state = np.concat([np.zeros([seq_len-state.shape[0], embedding_size]), state])
             return state
         assert state.shape[0] == seq_len
         assert state.shape[1] == embedding_size

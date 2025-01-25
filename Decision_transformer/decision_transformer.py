@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.optim.adam
 import torch.optim.adam
+import numpy as np
 
 class DecisionTransformer(nn.Module):
     """A transformer model.
@@ -41,9 +42,11 @@ class DecisionTransformer(nn.Module):
         # a : (batch_size, seq_len, action_size)
         # t : (batch_size, seq_len)
         
-        assert R.shape[0] == s.shape[0] == a.shape[0] 
-        assert R.shape[1] == s.shape[1] == a.shape[1] 
-        B = R.size(0)
+        # assert R.shape[0] == s.shape[0] == a.shape[0] 
+        # assert R.shape[1] == s.shape[1] == a.shape[1] 
+        # B = R.size(0)
+        print(f'Input shapes: R={R.shape}, s={s.shape}, a={a.shape}, t={t.shape}')
+        B= R.shape[0]
         
         all_positions = torch.arange(self.seq_len)
         pos_embeddings = self.positional_embeddings(all_positions)
@@ -58,38 +61,72 @@ class DecisionTransformer(nn.Module):
         assert a_embedding.shape[1]== s_embedding.shape[1] # We have an action less than states and returns to go
         input_embeddings = torch.stack([ s_embedding, R_embedding, a_embedding], dim=1) # (B,3,T,d_model)
         input_embeddings = input_embeddings.permute(0,2,1,3) # (B,T,3,d_model)
-        input_embeddings = input_embeddings.reshape(B, self.seq_len * 3, -1)  # [B, T*3, d_model]
-
-        a_hidden = self.transformer.forward(input_embeddings, input_embeddings)
-        a_hidden = a_hidden.view(B,-1)
-        a_logits = self.output_layer(a_hidden)
-        
-        return a_logits
+        # input_embeddings = input_embeddings.reshape(B, self.seq_len * 3, -1)  # [B, T*3, d_model]
+        return input_embeddings
 
 class BasicModel(nn.Module):
 
     def __init__(self,d_model=512,state_dim=10,action_dim=4,r_dim=10,seq_len=10,B=2):
         super().__init__()
         self.seq_len = seq_len
-        self.model = DecisionTransformer(r_dim, state_dim, action_dim, d_model, self.seq_len)
+        self.state_size = state_dim
+        self.action_size = action_dim
+        self.transformer = DecisionTransformer(r_dim, state_dim, action_dim, d_model, seq_len)
+        self.linear = nn.Linear(3*seq_len*d_model,action_dim)
+        
+        self.softmax = nn.Softmax(dim =-1)
         self.optim = None
+        self.r_size = r_dim
         self.seq_len= seq_len
-
+    def padding_input(self,R,s,a):
+        a = [padding(np.array(elem),self.seq_len,self.action_size) for elem in a]
+        R = [padding(np.array(elem),self.seq_len,self.r_size) for elem in R]
+        s = [padding(np.array(elem),self.seq_len,self.state_size) for elem in s]
+        return  R,s,a 
     def forward(self,R,s,a,t):
-        return self.model(R,s,a,t)
-    def init_optimizer(self,lr= torch.tensor(0.01)):
-        self.optim = torch.optim.Adam([lr])
+        batch_size = R.shape[0]
+        hidden_state_output= self.transformer(R,s,a,t)
+        print("After transformer{hidden_state_output}")
+        # flatten the output 
+        hidden_state_output = hidden_state_output.reshape([batch_size,-1])
+        print(f"After flatten{hidden_state_output}")
+        state_forward = self.linear(hidden_state_output)
+        print(f"After linear {state_forward}")
+        state = self.softmax(state_forward)
+        # print(f"after softmax {state}")
+        return state
+    def init_optimizer(self,lr= 0.01):
+        self.optim = torch.optim.Adam(self.params,[lr])
 
-    
+def padding(state,seq_len,embedding_size):
+    """
+    get a state and adds a padding it is not the good size.
+    """
+    try:
+        if state.size == 0:
+            return np.zeros([seq_len,embedding_size])
+        elif state.shape.equals([seq_len,embedding_size]):
+            return state
+        elif state.shape[0] < seq_len:
+            state = np.zeros([seq_len-state.shape[0], embedding_size]) + state
+            return state
+        assert state.shape[0] == seq_len
+        assert state.shape[1] == embedding_size
+        return state
+    except:
+        return np.zeros([seq_len,embedding_size])
 if __name__ == "__main__":
     d_model = 512
     state_dim = 10
     action_dim = 4
-    r_dim = 1
+    r_dim = 2 
     seq_len = 10
     B = 1
     model = BasicModel(d_model, state_dim, action_dim, r_dim, seq_len, B)
+    for name,layer in model.named_modules():
+        print(f"Layer Name  {name}, Layer: {layer}")
     R = torch.randn(B,seq_len,r_dim)
     s = torch.randn(B,seq_len,state_dim)
     a = torch.randn(B,seq_len,action_dim)
     t = torch.tensor([1])
+    # model.forward(R,s,a,t)
