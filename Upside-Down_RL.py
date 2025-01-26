@@ -40,7 +40,7 @@ replay_size = 500
 return_scale = 20
 
 # Evaluate the agent after `evaluate_every` iterations
-evaluate_every = 1
+evaluate_every = 2
 
 # Target return before breaking out of the training loop
 target_return = 1
@@ -292,18 +292,19 @@ def train_behavior(behavior, buffer, n_updates, batch_size):
             dt = t2 - t1
             dr = np.array([sum(episode.rewards[t1:t])for t in range(t2,t1,-1)])
             horizon = np.flip(np.arange(0,t2-t1)) +1.0
-            command = [[dr[index],horizon[index]] for index in range(horizon.shape[0])]
+            command = torch.Tensor([[dr[index],horizon[index]] for index in range(horizon.shape[0])])
             
             
-            st1 = episode.states[t1:t2]
-            at1 = episode.actions[t1:t2+1] # take the next action with it 
-            at1 = state_to_dummy(at1)
+            st1 = torch.Tensor(episode.states[t1:t2])
+            at1 = episode.actions[t1:t2+1] # take the next action with it
+            at1 = torch.Tensor(at1).to(int) 
+            at1 = torch.nn.functional.one_hot(at1,num_classes=action_size)
             target = at1[-1]
             at1 = at1[:-1]
-            st1 = padding(np.array(st1),behavior.seq_len,behavior.state_size)
-            at1 = padding(np.array(at1),behavior.seq_len,behavior.action_size)
+            st1 = padding(st1,behavior.seq_len,behavior.state_size)
+            at1 = padding(at1,behavior.seq_len,behavior.action_size)
             
-            command = padding(np.array(command),behavior.seq_len,2)
+            command = padding(command,behavior.seq_len,2)
             
             batch_states.append(st1)
             batch_actions.append(at1)
@@ -398,7 +399,8 @@ def evaluate_agent(env, behavior, command, render=False):
             pred_action = behavior.forward(commands.to(device),states.to(device), actions.to(device),torch.Tensor(t).to(device=device))
             pred_action = int(torch.argmax(pred_action))
             next_state, reward, done, _,_ = env.step(pred_action)
-            actions=torch.cat((actions,torch.Tensor(state_to_dummy([pred_action])).unsqueeze(0)),dim=1)
+            one_hot = torch.nn.functional.one_hot(torch.Tensor([[pred_action]]).to(int),num_classes=action_size)
+            actions=torch.cat((actions,one_hot),dim=1)
             total_reward += reward
             next_state = next_state.tolist()
             states= torch.cat((states,torch.Tensor(states)),dim=1)
@@ -508,7 +510,7 @@ def generate_episode(env, policy, init_command=[1, 1]):
         time_steps += 1
         
     return make_episode(states, actions, rewards, commands, sum(rewards), time_steps)
-def UDRL(env, buffer=None, behavior=None, learning_history=[]):
+def UDRL(env, buffer=None, behavior=None, learning_history=[],render_evaluate=False):
     '''
     Upside-Down Reinforcement Learning main algrithm
     
@@ -547,7 +549,7 @@ def UDRL(env, buffer=None, behavior=None, learning_history=[]):
         
         if i % evaluate_every == 0:
             command = sample_command(buffer, last_few)
-            mean_return = evaluate_agent(env, behavior, command)
+            mean_return = evaluate_agent(env, behavior, command,render=render_evaluate)
             
             learning_history.append({
                 'training_loss': mean_loss,
@@ -637,23 +639,31 @@ def generate_episodes(env, behavior, buffer, n_episodes, last_few):
     
     # Let's keep this buffer sorted
     buffer.sort()
-def padding(state,seq_len,embedding_size):
+def padding(state, seq_len, embedding_size, device="cpu"):
     """
-    get a state and adds a padding it is not the good size.
+    Get a state and add padding if it is not the correct size.
     """
-    try:
-        if state.size == 0:
-            return np.zeros([seq_len,embedding_size])
-        elif state.shape==tuple([seq_len,embedding_size]):
-            return state
-        elif state.shape[0] < seq_len:
-            state = np.concat([np.zeros([seq_len-state.shape[0], embedding_size]), state])
-            return state
-        assert state.shape[0] == seq_len
-        assert state.shape[1] == embedding_size
+    # Handle the case where the input state is empty
+    if state.nelement() == 0:  # Check for empty tensor
+        return torch.zeros(seq_len, embedding_size, device=device)
+    
+    # Check if the state is already the correct shape
+    if state.shape == (seq_len, embedding_size):
+        return state.to(device)
+    
+    # If the sequence length is less than the target, pad at the beginning
+    if state.shape[0] < seq_len:
+        padding_size = seq_len - state.shape[0]
+        padding_tensor = torch.zeros(padding_size, embedding_size, device=device)
+        state = torch.cat((padding_tensor, state.to(device)), dim=0)
         return state
-    except:
-       return np.zeros([seq_len,embedding_size])
+    if state.shape[0] > seq_len:
+        state = state[-seq_len:]
+
+    # Ensure the dimensions are valid
+    assert state.shape[0] == seq_len, f"Expected seq_len={seq_len}, got {state.shape[0]}"
+    assert state.shape[1] == embedding_size, f"Expected embedding_size={embedding_size}, got {state.shape[1]}"
+    return state.to(device)
 def state_to_dummy(states,n_action=4):
     """
     get a list of action returns the actions in dummy variables
@@ -665,4 +675,4 @@ def state_to_dummy(states,n_action=4):
         new_states.append(dummy_state)
     return new_states
 
-UDRL(env)
+UDRL(env,render_evaluate=True)
