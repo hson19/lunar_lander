@@ -1,4 +1,4 @@
-import gym
+# import gym
 import gymnasium as gym
 import numpy as np
 import torch
@@ -319,6 +319,7 @@ def train_behavior(behavior, buffer, n_updates, batch_size):
         batch_actions = torch.Tensor(np.array(batch_actions)).to(device)
         batch_target = torch.Tensor(np.array(batch_target)).to(device)
         batch_command = torch.Tensor(np.array(batch_command)).to(device)
+        time = torch.Tensor(time).to(device)
         pred = behavior(batch_command,batch_states,batch_actions,time)
         
         loss = F.cross_entropy(pred, batch_target)
@@ -375,7 +376,7 @@ def evaluate_agent(env, behavior, command, render=False):
         
     desired_return = command[0]
     desired_horizon = command[1]
-    
+    init_command = torch.Tensor(command).unsqueeze(0) # T,S
     print('Desired return: {:.2f}, Desired horizon: {:.2f}.'.format(desired_return, desired_horizon), end=' ')
     
     all_rewards = []
@@ -384,27 +385,29 @@ def evaluate_agent(env, behavior, command, render=False):
         
         done = False
         total_reward = 0
-        state = list(env.reset()[0])
-        action =np.array([])
+        states = torch.Tensor((env.reset()[0])).unsqueeze(0).unsqueeze(0)
+        actions =torch.zeros([1,behavior.seq_len,behavior.action_size]) # THIS will be Filled by padding_input()
+        commands = torch.Tensor(init_command).unsqueeze(0) # B,T,S
         # returns_to_go = np.array([1])
         # returns_to_go=states_to_returns_to_go(state)
         while not done:
             if render: env.render()
             
             t =10  
-            command_input,state_input,action_input = behavior.padding_input([command],[state],[action])
-            action = behavior.forward(torch.Tensor(command_input),torch.Tensor(state_input), torch.Tensor(action_input),t)
-            action = np.argmax(action.detach().numpy())
-            next_state, reward, done, _,_ = env.step(action)
-
+            commands,states,actions = behavior.padding_input(commands,states,actions)
+            pred_action = behavior.forward(commands.to(device),states.to(device), actions.to(device),torch.Tensor(t).to(device=device))
+            pred_action = int(torch.argmax(pred_action))
+            next_state, reward, done, _,_ = env.step(pred_action)
+            actions=torch.cat((actions,torch.Tensor(state_to_dummy([pred_action])).unsqueeze(0)),dim=1)
             total_reward += reward
-            state = next_state.tolist()
+            next_state = next_state.tolist()
+            states= torch.cat((states,torch.Tensor(states)),dim=1)
 
             desired_return = min(desired_return - reward, max_reward)
             desired_horizon = max(desired_horizon - 1, 1)
 
-            command = [desired_return, desired_horizon]
-        
+            commands= torch.cat((commands,torch.Tensor([[[desired_return, desired_horizon]]])),dim=1)
+            all_rewards.append(reward)
         if render: env.close()
         
         
@@ -605,9 +608,7 @@ def initialize_behavior_function(state_size,
         Behavior instance
     
     '''
-    print("state size",state_size) 
-    print("action size",action_size)
-    behavior = BasicModel(state_dim=state_size,action_dim=action_size,r_dim=2)
+    behavior = BasicModel(state_dim=state_size,action_dim=action_size,r_dim=2).to(device)
     
     behavior.init_optimizer(lr=torch.tensor(learning_rate))
     

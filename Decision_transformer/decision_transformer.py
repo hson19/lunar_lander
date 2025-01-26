@@ -5,6 +5,7 @@ import torch.optim.adam
 import torch.optim.adam
 import numpy as np
 
+device = torch.device('cuda')
 class DecisionTransformer(nn.Module):
     """A transformer model.
 
@@ -45,11 +46,12 @@ class DecisionTransformer(nn.Module):
         # assert R.shape[0] == s.shape[0] == a.shape[0] 
         # assert R.shape[1] == s.shape[1] == a.shape[1] 
         # B = R.size(0)
-        print(f'Input shapes: R={R.shape}, s={s.shape}, a={a.shape}, t={t.shape}')
         B= R.shape[0]
         
-        all_positions = torch.arange(self.seq_len)
+        all_positions = torch.arange(self.seq_len).to(device)
         pos_embeddings = self.positional_embeddings(all_positions)
+        
+
         
         s_embedding  = self.state_embedding(s) + pos_embeddings  
                
@@ -68,6 +70,7 @@ class BasicModel(nn.Module):
 
     def __init__(self,d_model=512,state_dim=10,action_dim=4,r_dim=10,seq_len=10,B=2):
         super().__init__()
+        self.optim = None
         self.seq_len = seq_len
         self.state_size = state_dim
         self.action_size = action_dim
@@ -78,43 +81,50 @@ class BasicModel(nn.Module):
         self.optim = None
         self.r_size = r_dim
         self.seq_len= seq_len
+        
     def padding_input(self,R,s,a):
-        a = [padding(np.array(elem),self.seq_len,self.action_size) for elem in a]
-        R = [padding(np.array(elem),self.seq_len,self.r_size) for elem in R]
-        s = [padding(np.array(elem),self.seq_len,self.state_size) for elem in s]
+        a = torch.stack([padding(elem,self.seq_len,self.action_size) for elem in a])
+        R =torch.stack([padding(elem,self.seq_len,self.r_size) for elem in R])
+        s = torch.stack([padding(elem,self.seq_len,self.state_size) for elem in s])
         return  R,s,a 
     def forward(self,R,s,a,t):
         batch_size = R.shape[0]
         hidden_state_output= self.transformer(R,s,a,t)
-        print("After transformer{hidden_state_output}")
         # flatten the output 
         hidden_state_output = hidden_state_output.reshape([batch_size,-1])
-        print(f"After flatten{hidden_state_output}")
-        state_forward = self.linear(hidden_state_output)
-        print(f"After linear {state_forward}")
+        
+        state_forward = self.linear(hidden_state_output)        
         state = self.softmax(state_forward)
-        # print(f"after softmax {state}")
         return state
     def init_optimizer(self,lr= 0.01):
-        self.optim = torch.optim.Adam(self.params,[lr])
+        self.optim = torch.optim.Adam([lr])
 
-def padding(state,seq_len,embedding_size):
+def padding(state, seq_len, embedding_size, device="cpu"):
     """
-    get a state and adds a padding it is not the good size.
+    Get a state and add padding if it is not the correct size.
     """
-    try:
-        if state.size == 0:
-            return np.zeros([seq_len,embedding_size])
-        elif state.shape.equals([seq_len,embedding_size]):
-            return state
-        elif state.shape[0] < seq_len:
-            state = np.zeros([seq_len-state.shape[0], embedding_size]) + state
-            return state
-        assert state.shape[0] == seq_len
-        assert state.shape[1] == embedding_size
+    # Handle the case where the input state is empty
+    if state.nelement() == 0:  # Check for empty tensor
+        return torch.zeros(seq_len, embedding_size, device=device)
+    
+    # Check if the state is already the correct shape
+    if state.shape == (seq_len, embedding_size):
+        return state.to(device)
+    
+    # If the sequence length is less than the target, pad at the beginning
+    if state.shape[0] < seq_len:
+        padding_size = seq_len - state.shape[0]
+        padding_tensor = torch.zeros(padding_size, embedding_size, device=device)
+        state = torch.cat((padding_tensor, state.to(device)), dim=0)
         return state
-    except:
-        return np.zeros([seq_len,embedding_size])
+    if state.shape[0] > seq_len:
+        state = state[-seq_len:]
+
+    # Ensure the dimensions are valid
+    assert state.shape[0] == seq_len, f"Expected seq_len={seq_len}, got {state.shape[0]}"
+    assert state.shape[1] == embedding_size, f"Expected embedding_size={embedding_size}, got {state.shape[1]}"
+    return state.to(device)
+
 if __name__ == "__main__":
     d_model = 512
     state_dim = 10
