@@ -6,7 +6,7 @@ from torch.optim import Adam
 from torch.distributions import Categorical
 from collections import namedtuple
 import torch.nn.functional as F
-from models.decision_transformer import DecisionTransformer
+from models.decision_transformer import DecisionTransformer,DecisionTransformerConfig
 # from torchviz import make_dot
 # Number of iterations in the main loop
 n_main_iter = 5000
@@ -493,7 +493,7 @@ def generate_episode(env, behavior:DecisionTransformerBehavior, init_command=[1,
         time_steps += 1
         
     return make_episode(states, actions, rewards, commands, sum(rewards), time_steps)
-def UDRL(env, buffer=None, behavior=None, learning_history=[],render_evaluate=False):
+def UDRL(env,config, buffer=None, behavior=None, learning_history=[],render_evaluate=False):
     '''
     Upside-Down Reinforcement Learning main algrithm
     
@@ -507,11 +507,7 @@ def UDRL(env, buffer=None, behavior=None, learning_history=[],render_evaluate=Fa
     '''
     
     if behavior is None:
-        behavior = initialize_behavior_function(state_size, 
-                                                action_size, 
-                                                hidden_size, 
-                                                learning_rate, 
-                                                [return_scale, horizon_scale])
+        behavior = initialize_behavior_function(config)
     if buffer is None:
         buffer = initialize_replay_buffer(replay_size,behavior,
                                           n_warm_up_episodes, 
@@ -573,11 +569,7 @@ def initialize_replay_buffer(replay_size,behavior, n_episodes, last_few):
     buffer.sort()
     return buffer
 
-def initialize_behavior_function(state_size, 
-                                 action_size, 
-                                 hidden_size, 
-                                 learning_rate, 
-                                 command_scale):
+def initialize_behavior_function(config):
     '''
     Initialize the behaviour function. See section 2.3.2
     
@@ -592,7 +584,7 @@ def initialize_behavior_function(state_size,
         Behavior instance
     
     '''
-    behavior = DecisionTransformerBehavior(2,state_size,action_size,512,10,1).to(device)
+    behavior = DecisionTransformerBehavior(config).to(device)
     
     behavior.init_optimizer(lr=torch.tensor(learning_rate))
     
@@ -657,7 +649,6 @@ def state_to_dummy(states,n_action=4):
         new_states.append(dummy_state)
     return new_states
 if __name__ == "__main__":
-
-    behavior_model, buffer, learning_history=UDRL(env,render_evaluate=True)
+    behavior_model, buffer, learning_history=UDRL(env,DecisionTransformerConfig(),render_evaluate=True)
     # save the model
     behavior_model.save("training_finished")
