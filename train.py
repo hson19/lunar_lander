@@ -1,4 +1,3 @@
-# import gym
 import gymnasium as gym
 import numpy as np
 import torch
@@ -7,12 +6,13 @@ from torch.optim import Adam
 from torch.distributions import Categorical
 from collections import namedtuple
 import torch.nn.functional as F
-from Decision_transformer.decision_transformer import BasicModel
+from models.decision_transformer import DecisionTransformer
+# from torchviz import make_dot
 # Number of iterations in the main loop
 n_main_iter = 5000
 
 # Number of (input, target) pairs per batch used for training the behavior function
-batch_size = 16
+batch_size = 64
 
 # Scaling factor for desired horizon input
 horizon_scale = 0.01
@@ -22,7 +22,7 @@ horizon_scale = 0.01
 last_few = 75
 
 # Learning rate for the ADAM optimizer
-learning_rate = 0.0003
+learning_rate = 0.03
 
 # Number of exploratory episodes generated per step of UDRL training
 n_episodes_per_iter = 20
@@ -40,7 +40,7 @@ replay_size = 500
 return_scale = 20
 
 # Evaluate the agent after `evaluate_every` iterations
-evaluate_every = 2
+evaluate_every = 100
 
 # Target return before breaking out of the training loop
 target_return = 1
@@ -160,33 +160,8 @@ class Behavior(nn.Module):
         hidden_size (int) -- NOTE: not used at the moment
         command_scale (List of float)
     '''
-    
-    def __init__(self, 
-                 state_size, 
-                 action_size, 
-                 hidden_size, 
-                 command_scale = [1, 1]):
-        super().__init__()
-        
-        self.command_scale = torch.FloatTensor(command_scale).to(device)
-        
-        self.state_fc = nn.Sequential(nn.Linear(state_size, 64), 
-                                      nn.Tanh())
-        
-        self.command_fc = nn.Sequential(nn.Linear(2, 64), 
-                                        nn.Sigmoid())
-        
-        self.output_fc = nn.Sequential(nn.Linear(64, 128), 
-                                       nn.ReLU(), 
-#                                        nn.Dropout(0.2),
-                                       nn.Linear(128, 128), 
-                                       nn.ReLU(), 
-#                                        nn.Dropout(0.2),
-                                       nn.Linear(128, 128), 
-                                       nn.ReLU(), 
-                                       nn.Linear(128, action_size))
-        
-        self.to(device)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)  
         
     
     def forward(self, state, command):
@@ -261,7 +236,16 @@ class Behavior(nn.Module):
         
         self.load_state_dict(torch.load(filename))
 
-def train_behavior(behavior, buffer, n_updates, batch_size):
+class DecisionTransformerBehavior(DecisionTransformer,Behavior):
+
+    def padding_input(self,R,s,a):
+        a = torch.stack([padding(elem,self.seq_len,self.action_size) for elem in a]).to(device)
+        R =torch.stack([padding(elem,self.seq_len,self.r_size) for elem in R]).to(device)
+        s = torch.stack([padding(elem,self.seq_len,self.state_size) for elem in s]).to(device)
+        return  R,s,a 
+    def init_optimizer(self,lr=0.003):
+       self.optim = torch.optim.Adam(self.parameters(),lr)
+def train_behavior(behavior : Behavior, buffer : ReplayBuffer, n_updates : int, batch_size : int):
     '''Training loop
     
     Params:
@@ -277,6 +261,7 @@ def train_behavior(behavior, buffer, n_updates, batch_size):
     '''
     all_loss = []
     for update in range(n_updates):
+        behavior.optim.zero_grad()
         episodes = buffer.random_batch(batch_size)
         
         batch_states = []
@@ -324,16 +309,24 @@ def train_behavior(behavior, buffer, n_updates, batch_size):
         pred = behavior(batch_command,batch_states,batch_actions,time)
         
         loss = F.cross_entropy(pred, batch_target)
+        assert not loss.isnan(), ('loss is a nan pred: %f and batch: %f',pred,batch_target)
         
-        behavior.optim.zero_grad()
         loss.backward()
+        for param in behavior.parameters():
+            # print(f"weights before step {param}")
+            # print(f"gradients {param.grad}")
+            break
         behavior.optim.step()
+        for param in behavior.parameters():
+            # print(f"weights after step {param}")
+            # print(f"gradients {param.grad}")
+            break
         
         all_loss.append(loss.item())
     
     return np.mean(all_loss)
 def sample_command(buffer, last_few):
-    '''Sample a exploratory command
+    '''Sample a exploratory command 
     
     Params:
         buffer (ReplayBuffer)
@@ -359,7 +352,7 @@ def sample_command(buffer, last_few):
     desired_return = np.random.uniform(mean_return, mean_return+std_return)
     
     return [desired_return, desired_horizon]
-def evaluate_agent(env, behavior, command, render=False):
+def evaluate_agent(env, behavior: DecisionTransformer, command, render=False):
     '''
     Evaluate the agent performance by running an episode
     following Algorithm 2 steps
@@ -396,10 +389,10 @@ def evaluate_agent(env, behavior, command, render=False):
             
             t =10  
             commands,states,actions = behavior.padding_input(commands,states,actions)
-            pred_action = behavior.forward(commands.to(device),states.to(device), actions.to(device),torch.Tensor(t).to(device=device))
+            pred_action = behavior.forward(commands.to(device),states.to(device), actions.to(device),torch.Tensor(t))
             pred_action = int(torch.argmax(pred_action))
             next_state, reward, done, _,_ = env.step(pred_action)
-            one_hot = torch.nn.functional.one_hot(torch.Tensor([[pred_action]]).to(int),num_classes=action_size)
+            one_hot = torch.nn.functional.one_hot(torch.Tensor([[pred_action]]).to(int),num_classes=action_size).to(device)
             actions=torch.cat((actions,one_hot),dim=1)
             total_reward += reward
             next_state = next_state.tolist()
@@ -408,7 +401,7 @@ def evaluate_agent(env, behavior, command, render=False):
             desired_return = min(desired_return - reward, max_reward)
             desired_horizon = max(desired_horizon - 1, 1)
 
-            commands= torch.cat((commands,torch.Tensor([[[desired_return, desired_horizon]]])),dim=1)
+            commands= torch.cat((commands,torch.Tensor([[[desired_return, desired_horizon]]]).to(device)),dim=1)
             all_rewards.append(reward)
         if render: env.close()
         
@@ -428,28 +421,14 @@ make_episode = namedtuple('Episode',
                                        'total_return', 
                                        'length', 
                                        ])    
-# def transform(Episode,seq_len):
-#     """should get a Episode named tuple, 
-#      return the Episode in the return format """
-#     states= Episode['states']
-#     actions = Episode['actions']
-#     rewards = Episode['rewards']
-#     n = rewards.shape[0]
-#     returns_to_go = [sum(rewards[index:])for index in range(n)]
-#     input_format = []
 
-#     assert states.shape[0] == actions.states[0] == returns_to_go.shape[0]
-#     for index in range(n):
-#         input_format.append
-        
-
-def generate_episode(env, policy, init_command=[1, 1]):
+def generate_episode(env, behavior:DecisionTransformerBehavior, init_command=[1, 1]):
     '''
     Generate an episode using the Behaviour function.
     
     Params:
         env (OpenAI Gym Environment)
-        policy (func)
+        Behaviour(func)
         init_command (List of float) -- default [1, 1]
     
     Returns:
@@ -471,10 +450,14 @@ def generate_episode(env, policy, init_command=[1, 1]):
     state = list(env.reset()[0])
     
     while not done:
-        state_input = torch.FloatTensor(state).to(device)
-        command_input = torch.FloatTensor(command).to(device)
-        action = policy()
-        returned_step = env.step(action)
+        state_input = torch.FloatTensor(state).unsqueeze(0).unsqueeze(0).to(device)
+        command_input = torch.FloatTensor(command).unsqueeze(0).unsqueeze(0).to(device)
+        action_input = torch.zeros([1,state_input.shape[1],4]).to(device)
+        command_input,state_input,action_input = behavior.padding_input(command_input,state_input,action_input)
+        action=behavior(command_input,state_input,action_input,1)
+        action= torch.argmax(action)
+        # action = policy()
+        returned_step = env.step(int(action.to('cpu')))
         next_state, reward, done,_,_ = list(returned_step)
         
         # Modifying a bit the reward function punishing the agent, -100, 
@@ -523,18 +506,18 @@ def UDRL(env, buffer=None, behavior=None, learning_history=[],render_evaluate=Fa
         learning_history (List of dict) -- default []
     '''
     
-    if buffer is None:
-        buffer = initialize_replay_buffer(replay_size, 
-                                          n_warm_up_episodes, 
-                                          last_few)
-    
     if behavior is None:
         behavior = initialize_behavior_function(state_size, 
                                                 action_size, 
                                                 hidden_size, 
                                                 learning_rate, 
                                                 [return_scale, horizon_scale])
+    if buffer is None:
+        buffer = initialize_replay_buffer(replay_size,behavior,
+                                          n_warm_up_episodes, 
+                                          last_few)
     
+
     for i in range(1, n_main_iter+1):
         mean_loss = train_behavior(behavior, buffer, n_updates_per_iter, batch_size)
         
@@ -563,7 +546,7 @@ def UDRL(env, buffer=None, behavior=None, learning_history=[],render_evaluate=Fa
     
     return behavior, buffer, learning_history
 
-def initialize_replay_buffer(replay_size, n_episodes, last_few):
+def initialize_replay_buffer(replay_size,behavior, n_episodes, last_few):
     '''
     Initialize replay buffer with warm-up episodes using random actions.
     See section 2.3.1
@@ -578,14 +561,13 @@ def initialize_replay_buffer(replay_size, n_episodes, last_few):
         
     '''
     
-    # This policy will generate random actions. Won't need state nor command
-    random_policy = lambda : np.random.randint(env.action_space.n)
     
     buffer = ReplayBuffer(replay_size)
     
     for i in range(n_episodes):
         command = sample_command(buffer, last_few)
-        episode = generate_episode(env, random_policy, command) # See Algorithm 2
+        print(f'sample commanhd {command}')
+        episode = generate_episode(env,behavior, command) # See Algorithm 2
         buffer.add(episode)
     
     buffer.sort()
@@ -610,7 +592,7 @@ def initialize_behavior_function(state_size,
         Behavior instance
     
     '''
-    behavior = BasicModel(state_dim=state_size,action_dim=action_size,r_dim=2).to(device)
+    behavior = DecisionTransformerBehavior(2,state_size,action_size,512,10,1).to(device)
     
     behavior.init_optimizer(lr=torch.tensor(learning_rate))
     
@@ -630,11 +612,11 @@ def generate_episodes(env, behavior, buffer, n_episodes, last_few):
             how many episodes we use to calculate the desired return and horizon
     '''
     
-    stochastic_policy = lambda : np.random.randint(0,4)
+    # stochastic_policy = lambda : np.random.randint(0,4)
     
     for i in range(n_episodes):
         command = sample_command(buffer, last_few)
-        episode = generate_episode(env, stochastic_policy, command) # See Algorithm 2
+        episode = generate_episode(env, behavior, command) # See Algorithm 2
         buffer.add(episode)
     
     # Let's keep this buffer sorted
@@ -674,5 +656,8 @@ def state_to_dummy(states,n_action=4):
         np.put(dummy_state,state,float(1.0),mode='raise')
         new_states.append(dummy_state)
     return new_states
+if __name__ == "__main__":
 
-UDRL(env,render_evaluate=True)
+    behavior_model, buffer, learning_history=UDRL(env,render_evaluate=True)
+    # save the model
+    behavior_model.save("training_finished")
