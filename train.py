@@ -7,6 +7,12 @@ from torch.distributions import Categorical
 from collections import namedtuple
 import torch.nn.functional as F
 from models.decision_transformer import DecisionTransformer,DecisionTransformerConfig
+import logging
+logging.basicConfig(
+    filename="logs/training_log.csv",
+    level=logging.INFO,
+    format="%(message)s"
+)
 # from torchviz import make_dot
 # Number of iterations in the main loop
 n_main_iter = 5000
@@ -312,15 +318,8 @@ def train_behavior(behavior : Behavior, buffer : ReplayBuffer, n_updates : int, 
         assert not loss.isnan(), ('loss is a nan pred: %f and batch: %f',pred,batch_target)
         
         loss.backward()
-        for param in behavior.parameters():
-            # print(f"weights before step {param}")
-            # print(f"gradients {param.grad}")
-            break
         behavior.optim.step()
-        for param in behavior.parameters():
-            # print(f"weights after step {param}")
-            # print(f"gradients {param.grad}")
-            break
+        logging.info(f'{loss.item()},{command[0]},{command[1]}')
         
         all_loss.append(loss.item())
     
@@ -517,7 +516,9 @@ def UDRL(env,config, buffer=None, behavior=None, learning_history=[],render_eval
     for i in range(1, n_main_iter+1):
         mean_loss = train_behavior(behavior, buffer, n_updates_per_iter, batch_size)
         
-        print('Iter: {}, Loss: {:.4f}'.format(i, mean_loss), end='\r')
+        print('Iter: {}, Loss: {}'.format(i, mean_loss), end='\r')
+        if (i % 100 == 0):
+            behavior.save('weigths/iter_{}_loss_{}')
         
         # Sample exploratory commands and generate episodes
         generate_episodes(env, 
@@ -562,7 +563,6 @@ def initialize_replay_buffer(replay_size,behavior, n_episodes, last_few):
     
     for i in range(n_episodes):
         command = sample_command(buffer, last_few)
-        print(f'sample commanhd {command}')
         episode = generate_episode(env,behavior, command) # See Algorithm 2
         buffer.add(episode)
     
@@ -649,6 +649,7 @@ def state_to_dummy(states,n_action=4):
         new_states.append(dummy_state)
     return new_states
 if __name__ == "__main__":
+    DEBUG = 4
     behavior_model, buffer, learning_history=UDRL(env,DecisionTransformerConfig(),render_evaluate=True)
     # save the model
     behavior_model.save("training_finished")
