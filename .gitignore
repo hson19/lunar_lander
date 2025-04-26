@@ -2,6 +2,7 @@
 **/build/
 **/__pycache__/
 # don't save the model weights
+/weight/*
 weigth/*
 weightsts/*
 # don't save the logs
