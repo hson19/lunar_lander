@@ -1,5 +1,9 @@
 **/venv/
 **/build/
 **/__pycache__/
-weigths/*
+# don't save the model weights
+weigth/*
+weightsts/*
+# don't save the logs
 logs/*
+wandb/*
